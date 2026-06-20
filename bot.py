@@ -126,27 +126,55 @@ async def choose_direction(call: types.CallbackQuery):
 async def show_schedule(call: types.CallbackQuery):
     _, direction, group = call.data.split("::")
 
+    week_number = datetime.now().isocalendar().week
+    week_type = "ЧЁТНАЯ" if week_number % 2 == 0 else "НЕЧЁТНАЯ"
+
+    days = {
+        0: "ПН",
+        1: "ВТ",
+        2: "СР",
+        3: "ЧТ",
+        4: "ПТ",
+        5: "СБ",
+        6: "ВС"
+    }
+
+    today = days[datetime.now().weekday()]
+
     conn = get_connection()
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT day, lesson
+        SELECT pair, time, lesson
         FROM schedule
-        WHERE direction=? AND group_name=?
-    """, (direction, group))
+        WHERE direction=? 
+          AND group_name=? 
+          AND day=? 
+          AND week_type=?
+        ORDER BY pair
+    """, (direction, group, today, week_type))
 
     data = cur.fetchall()
     conn.close()
 
     if not data:
-        await call.message.answer("❌ Нет данных по расписанию")
+        await call.message.answer(
+            f"📅 Группа: {group}\n\n"
+            f"📖 Неделя: {week_type}\n"
+            f"🗓 Сегодня: {today}\n\n"
+            f"На сегодня занятий нет."
+        )
         await call.answer()
         return
 
-    text = f"📅 Расписание {group}:\n\n"
+    text = (
+        f"📅 Группа: {group}\n\n"
+        f"📖 Неделя: {week_type}\n"
+        f"🗓 Сегодня: {today}\n\n"
+    )
 
-    for day, lesson in data:
-        text += f"{day}: {lesson}\n"
+    for pair, time, lesson in data:
+        text += f"{pair} пара ({time}): {lesson}\n"
 
     await call.message.answer(text)
     await call.answer()
