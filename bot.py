@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -48,11 +49,15 @@ directions = [
 # ---------------- START ----------------
 @dp.message(Command("start"))
 async def start(message: types.Message):
+    week_number = datetime.now().isocalendar().week
+    parity = "ЧЁТНАЯ" if week_number % 2 == 0 else "НЕЧЁТНАЯ"
+
     await message.answer(
-        "🤖 БОТ ОБНОВЛЕН ✅ cтуденческий бот запущен\nВыбери раздел:",
+        f"🤖 Студенческий бот\n"
+        f"📖 Сейчас {parity.lower()} неделя\n\n"
+        f"Выбери раздел:",
         reply_markup=menu
     )
-
 
 # ---------------- FAQ ----------------
 @dp.message(lambda m: m.text == "📚 FAQ")
@@ -73,6 +78,9 @@ async def faq(message: types.Message):
 # ---------------- SCHEDULE STEP 1 ----------------
 @dp.message(lambda m: m.text == "📅 Расписание")
 async def schedule_menu(message: types.Message):
+    week_number = datetime.now().isocalendar().week
+    parity = "ЧЁТНАЯ" if week_number % 2 == 0 else "НЕЧЁТНАЯ"
+
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=d, callback_data=f"dir::{d}")]
@@ -80,7 +88,12 @@ async def schedule_menu(message: types.Message):
         ]
     )
 
-    await message.answer("📅 Выберите направление:", reply_markup=kb)
+    await message.answer(
+        f"📅 Расписание\n\n"
+        f"📖 Текущая неделя: {parity}\n\n"
+        f"Выберите направление:",
+        reply_markup=kb
+    )
 
 
 # ---------------- SCHEDULE STEP 2 ----------------
