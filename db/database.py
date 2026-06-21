@@ -1,5 +1,6 @@
 import sqlite3
 import os
+from config import ADMIN_ID   # <-- импортируем главного админа
 
 DB_NAME = "bot.db"
 
@@ -23,17 +24,16 @@ DAYS_MAP = {
     "ВС": "ВС",
 }
 
-
 # ---------------- CONNECTION ----------------
 def get_connection():
     return sqlite3.connect(DB_NAME)
-
 
 # ---------------- INIT DB ----------------
 def init_db():
     conn = get_connection()
     cur = conn.cursor()
 
+    # --- Основные таблицы (FAQ и расписание) ---
     cur.execute("""
     CREATE TABLE IF NOT EXISTS faq (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,12 +55,39 @@ def init_db():
     )
     """)
 
+    # --- Таблица news с поддержкой заголовка и фото ---
     cur.execute("""
     CREATE TABLE IF NOT EXISTS news (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         text TEXT
     )
     """)
+
+    # Добавляем колонки title и photo_id, если их нет
+    cur.execute("PRAGMA table_info(news)")
+    columns = [col[1] for col in cur.fetchall()]
+    if "title" not in columns:
+        cur.execute("ALTER TABLE news ADD COLUMN title TEXT")
+    if "photo_id" not in columns:
+        cur.execute("ALTER TABLE news ADD COLUMN photo_id TEXT")
+
+    # --- Таблица администраторов ---
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS admins (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER UNIQUE NOT NULL
+    )
+    """)
+
+    # --- Таблица пользователей (для рассылки) ---
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY
+    )
+    """)
+
+    # Добавляем главного админа, если его ещё нет
+    cur.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (ADMIN_ID,))
 
     conn.commit()
     conn.close()

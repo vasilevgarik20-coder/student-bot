@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sqlite3
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, types, F
@@ -15,8 +16,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 
 from config import TOKEN, ADMIN_ID
-from db.database import init_db, seed_data, get_connection
-from services.faq import get_faq
+from db.database import get_connection
 
 logging.basicConfig(level=logging.INFO)
 
@@ -24,10 +24,41 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 
+# ================== УДАЛЕНИЕ СТАРЫХ СООБЩЕНИЙ ==================
+# Словарь для хранения последнего сообщения бота для каждого пользователя
+last_msg = {}  # user_id -> message_id
+
+async def delete_previous(user_id: int, chat_id: int):
+    """Удаляет предыдущее сообщение бота для пользователя, если оно есть"""
+    if user_id in last_msg:
+        try:
+            await bot.delete_message(chat_id, last_msg[user_id])
+        except Exception:
+            pass  # сообщение уже удалено или старше 48 часов
+        del last_msg[user_id]
+
+async def send_with_delete(chat_id: int, user_id: int, *args, **kwargs):
+    """Отправляет сообщение, предварительно удалив предыдущее"""
+    await delete_previous(user_id, chat_id)
+    msg = await bot.send_message(chat_id, *args, **kwargs)
+    last_msg[user_id] = msg.message_id
+    return msg
+
+async def send_photo_with_delete(chat_id: int, user_id: int, photo, *args, **kwargs):
+    """Отправляет фото, предварительно удалив предыдущее сообщение"""
+    await delete_previous(user_id, chat_id)
+    msg = await bot.send_photo(chat_id, photo, *args, **kwargs)
+    last_msg[user_id] = msg.message_id
+    return msg
+
+
 # ---------------- FSM ----------------
 class NewsState(StatesGroup):
+    waiting_title = State()
     waiting_text = State()
-
+    waiting_photo = State()
+    waiting_admin_id = State()
+    waiting_delete_admin_id = State()
 
 # ---------------- KEYBOARDS ----------------
 menu = ReplyKeyboardMarkup(
@@ -44,7 +75,7 @@ back_kb = InlineKeyboardMarkup(
     ]
 )
 
-# ГРУППЫ ДЛЯ КАЖДОГО НАПРАВЛЕНИЯ (ТОЧНО КАК В БД)
+# ГРУППЫ ДЛЯ КАЖДОГО НАПРАВЛЕНИЯ
 groups_map = {
     "ИСиП": ["09C31", "09C32", "09C33", "09C34", "09C35", "09C41", "09C42"],
     "Электронные устройства": ["11C31", "11C41"],
@@ -56,41 +87,295 @@ directions = list(groups_map.keys())
 
 
 # ---------------- ADMIN ----------------
-@dp.message(Command("admin"))
+@dp.message(Command("aboba228"))
 async def admin_panel(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Нет доступа")
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM admins WHERE user_id = ?", (message.from_user.id,))
+    admin = cur.fetchone()
+    conn.close()
+    
+    if not admin:
+        await send_with_delete(message.chat.id, message.from_user.id, "⛔ Нет доступа")
         return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить новость", callback_data="add_news")]
+        [InlineKeyboardButton(text="➕ Добавить новость", callback_data="add_news")],
+        [InlineKeyboardButton(text="🗑 Удалить новость", callback_data="delete_news")],
+        [InlineKeyboardButton(text="👤 Добавить админа", callback_data="add_admin")],
+        [InlineKeyboardButton(text="👤 Удалить админа", callback_data="delete_admin")],
+        [InlineKeyboardButton(text="🚪 Выйти из админ-панели", callback_data="exit_admin")]
     ])
 
-    await message.answer("🛠 Админ-панель", reply_markup=kb)
+    await send_with_delete(message.chat.id, message.from_user.id, "🛠 Админ-панель", reply_markup=kb)
 
 
+# ---------------- ADD NEWS ----------------
 @dp.callback_query(F.data == "add_news")
-async def add_news(call: types.CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID:
+async def add_news_start(call: types.CallbackQuery, state: FSMContext):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM admins WHERE user_id = ?", (call.from_user.id,))
+    admin = cur.fetchone()
+    conn.close()
+    
+    if not admin:
         await call.answer("Нет доступа", show_alert=True)
         return
 
-    await state.set_state(NewsState.waiting_text)
-    await call.message.answer("📝 Введите текст новости:")
+    await state.set_state(NewsState.waiting_title)
+    # Здесь не удаляем предыдущее, так как это запрос, и пользователь должен его видеть
+    await call.message.answer("📝 Введите ЗАГОЛОВОК новости:")
     await call.answer()
 
 
+@dp.message(NewsState.waiting_title)
+async def get_news_title(message: types.Message, state: FSMContext):
+    await state.update_data(title=message.text)
+    await state.set_state(NewsState.waiting_text)
+    await message.answer("📝 Введите ТЕКСТ новости:")
+
+
 @dp.message(NewsState.waiting_text)
-async def save_news(message: types.Message, state: FSMContext):
+async def get_news_text(message: types.Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    await state.set_state(NewsState.waiting_photo)
+    await message.answer("🖼 Отправьте ФОТО для новости (или отправьте 'пропустить' для новости без фото):")
+
+
+@dp.message(NewsState.waiting_photo)
+async def save_news_with_photo(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    title = data.get('title')
+    text = data.get('text')
+    
+    photo_id = None
+    if message.photo:
+        photo_id = message.photo[-1].file_id
+    elif message.text and message.text.lower() == 'пропустить':
+        pass
+    else:
+        await message.answer("❌ Пожалуйста, отправьте фото или напишите 'пропустить'")
+        return
+    
     conn = get_connection()
     cur = conn.cursor()
-
-    cur.execute("INSERT INTO news (text) VALUES (?)", (message.text,))
+    cur.execute(
+        "INSERT INTO news (title, text, photo_id) VALUES (?, ?, ?)",
+        (title, text, photo_id)
+    )
     conn.commit()
     conn.close()
-
+    
     await state.clear()
-    await message.answer("✅ Новость добавлена!")
+    await send_with_delete(message.chat.id, message.from_user.id, f"✅ Новость '{title}' добавлена!")
+    
+    await send_news_to_users(title, text, photo_id)
+
+
+async def send_news_to_users(title, text, photo_id):
+    """Отправляет новость всем пользователям кроме админов"""
+    conn = get_connection()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT user_id FROM admins")
+    admins = [row[0] for row in cur.fetchall()]
+    
+    cur.execute("SELECT user_id FROM users")
+    users = cur.fetchall()
+    conn.close()
+    
+    sent = 0
+    for user in users:
+        user_id = user[0]
+        if user_id in admins:
+            continue
+            
+        try:
+            if photo_id:
+                await bot.send_photo(
+                    user_id,
+                    photo_id,
+                    caption=f"📰 {title}\n\n{text}"
+                )
+            else:
+                await bot.send_message(
+                    user_id,
+                    f"📰 {title}\n\n{text}"
+                )
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logging.error(f"Не удалось отправить пользователю {user_id}: {e}")
+    
+    logging.info(f"✅ Новость отправлена {sent} пользователям")
+
+
+# ---------------- DELETE NEWS ----------------
+@dp.callback_query(F.data == "delete_news")
+async def delete_news_start(call: types.CallbackQuery):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM admins WHERE user_id = ?", (call.from_user.id,))
+    admin = cur.fetchone()
+    
+    if not admin:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+    
+    cur.execute("SELECT id, title FROM news ORDER BY id DESC LIMIT 20")
+    news_list = cur.fetchall()
+    conn.close()
+    
+    if not news_list:
+        await send_with_delete(call.message.chat.id, call.from_user.id, "📭 Новостей нет")
+        await call.answer()
+        return
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+    for news_id, title in news_list:
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=f"🗑 {title[:30]}", 
+                callback_data=f"delete_news_{news_id}"
+            )
+        ])
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(text="🔙 Назад", callback_data="exit_admin")
+    ])
+    
+    await send_with_delete(call.message.chat.id, call.from_user.id, "🗑 Выберите новость для удаления:", reply_markup=kb)
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("delete_news_"))
+async def confirm_delete_news(call: types.CallbackQuery):
+    news_id = int(call.data.split("_")[2])
+    
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM admins WHERE user_id = ?", (call.from_user.id,))
+    admin = cur.fetchone()
+    
+    if not admin:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+    
+    cur.execute("SELECT title FROM news WHERE id = ?", (news_id,))
+    news = cur.fetchone()
+    
+    if not news:
+        await send_with_delete(call.message.chat.id, call.from_user.id, "❌ Новость не найдена")
+        await call.answer()
+        return
+    
+    title = news[0]
+    cur.execute("DELETE FROM news WHERE id = ?", (news_id,))
+    conn.commit()
+    conn.close()
+    
+    await send_with_delete(call.message.chat.id, call.from_user.id, f"✅ Новость '{title}' удалена!")
+    await call.answer()
+
+
+# ---------------- ADD ADMIN ----------------
+@dp.callback_query(F.data == "add_admin")
+async def add_admin_start(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("❌ Только главный админ может добавлять админов", show_alert=True)
+        return
+    
+    await state.set_state(NewsState.waiting_admin_id)
+    await call.message.answer("👤 Введите ID пользователя, которого хотите сделать админом:")
+    await call.answer()
+
+
+@dp.message(NewsState.waiting_admin_id)
+async def add_admin_save(message: types.Message, state: FSMContext):
+    try:
+        user_id = int(message.text)
+    except ValueError:
+        await send_with_delete(message.chat.id, message.from_user.id, "❌ Введите корректный ID (число)")
+        return
+    
+    conn = get_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("INSERT INTO admins (user_id) VALUES (?)", (user_id,))
+        conn.commit()
+        await send_with_delete(message.chat.id, message.from_user.id, f"✅ Пользователь {user_id} добавлен в админы!")
+    except sqlite3.IntegrityError:
+        await send_with_delete(message.chat.id, message.from_user.id, f"⚠️ Пользователь {user_id} уже является админом")
+    finally:
+        conn.close()
+    
+    await state.clear()
+
+
+# ---------------- DELETE ADMIN ----------------
+@dp.callback_query(F.data == "delete_admin")
+async def delete_admin_start(call: types.CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("❌ Только главный админ может удалять админов", show_alert=True)
+        return
+    
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM admins WHERE user_id != ?", (ADMIN_ID,))
+    admins = cur.fetchall()
+    conn.close()
+    
+    if not admins:
+        await send_with_delete(call.message.chat.id, call.from_user.id, "📭 Нет других админов для удаления")
+        await call.answer()
+        return
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+    for admin_id in admins:
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=f"👤 {admin_id[0]}", 
+                callback_data=f"delete_admin_{admin_id[0]}"
+            )
+        ])
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(text="🔙 Назад", callback_data="exit_admin")
+    ])
+    
+    await send_with_delete(call.message.chat.id, call.from_user.id, "👤 Выберите админа для удаления:", reply_markup=kb)
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("delete_admin_"))
+async def confirm_delete_admin(call: types.CallbackQuery):
+    user_id = int(call.data.split("_")[2])
+    
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("❌ Только главный админ может удалять админов", show_alert=True)
+        return
+    
+    if user_id == ADMIN_ID:
+        await send_with_delete(call.message.chat.id, call.from_user.id, "❌ Нельзя удалить главного админа!")
+        await call.answer()
+        return
+    
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    
+    await send_with_delete(call.message.chat.id, call.from_user.id, f"✅ Админ {user_id} удален!")
+    await call.answer()
+
+
+# ---------------- EXIT ADMIN ----------------
+@dp.callback_query(F.data == "exit_admin")
+async def exit_admin(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await send_with_delete(call.message.chat.id, call.from_user.id, "👋 Выход из админ-панели")
+    await call.answer()
 
 
 # ---------------- NEWS ----------------
@@ -98,17 +383,35 @@ async def save_news(message: types.Message, state: FSMContext):
 async def show_news(message: types.Message):
     conn = get_connection()
     cur = conn.cursor()
-
-    cur.execute("SELECT text FROM news ORDER BY id DESC LIMIT 10")
+    
+    cur.execute("SELECT id, title, text, photo_id FROM news ORDER BY id DESC LIMIT 10")
     data = cur.fetchall()
     conn.close()
-
+    
     if not data:
-        await message.answer("Новостей пока нет")
+        await send_with_delete(message.chat.id, message.from_user.id, "📭 Новостей пока нет")
         return
-
-    text = "📰 Новости:\n\n" + "\n\n".join(f"• {n[0]}" for n in data)
-    await message.answer(text)
+    
+    # Удаляем предыдущее сообщение перед отправкой первой новости
+    await delete_previous(message.from_user.id, message.chat.id)
+    
+    for news_id, title, text, photo_id in data:
+        try:
+            if photo_id:
+                msg = await bot.send_photo(
+                    message.chat.id,
+                    photo_id,
+                    caption=f"📰 {title}\n\n{text}\n\n🆔 ID: {news_id}"
+                )
+            else:
+                msg = await bot.send_message(
+                    message.chat.id,
+                    f"📰 {title}\n\n{text}\n\n🆔 ID: {news_id}"
+                )
+            # Сохраняем только последнее сообщение (чтобы удалить только его)
+            last_msg[message.from_user.id] = msg.message_id
+        except Exception as e:
+            logging.error(f"Ошибка при показе новости: {e}")
 
 
 # ---------------- START ----------------
@@ -117,8 +420,16 @@ async def start(message: types.Message):
     now = datetime.now()
     week_number = now.isocalendar().week
     parity = "ЧЁТНАЯ" if week_number % 2 == 0 else "НЕЧЁТНАЯ"
+    
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,))
+    conn.commit()
+    conn.close()
 
-    await message.answer(
+    await send_with_delete(
+        message.chat.id,
+        message.from_user.id,
         f"🤖 Студенческий бот\n"
         f"📖 Сейчас {parity.lower()} неделя\n\n"
         f"Выбери раздел:",
@@ -129,16 +440,20 @@ async def start(message: types.Message):
 # ---------------- FAQ ----------------
 @dp.message(F.text == "📚 FAQ")
 async def faq(message: types.Message):
-    data = get_faq()
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT question, answer FROM faq")
+    data = cur.fetchall()
+    conn.close()
 
     if not data:
-        await message.answer("FAQ пока пуст 😔")
+        await send_with_delete(message.chat.id, message.from_user.id, "FAQ пока пуст 😔")
         return
 
     text = "📚 FAQ:\n\n"
     text += "\n\n".join([f"❓ {q}\n➡️ {a}" for q, a in data])
 
-    await message.answer(text, reply_markup=back_kb)
+    await send_with_delete(message.chat.id, message.from_user.id, text, reply_markup=back_kb)
 
 
 # ---------------- SCHEDULE ----------------
@@ -153,7 +468,9 @@ async def schedule_menu(message: types.Message):
         for d in directions
     ])
 
-    await message.answer(
+    await send_with_delete(
+        message.chat.id,
+        message.from_user.id,
         f"📅 Расписание\n\n"
         f"📖 Текущая неделя: {parity}\n\n"
         f"Выберите направление:",
@@ -171,7 +488,7 @@ async def choose_direction(call: types.CallbackQuery):
         for g in groups
     ])
 
-    await call.message.answer("👥 Выберите группу:", reply_markup=kb)
+    await send_with_delete(call.message.chat.id, call.from_user.id, "👥 Выберите группу:", reply_markup=kb)
     await call.answer()
 
 
@@ -179,25 +496,6 @@ async def choose_direction(call: types.CallbackQuery):
 async def show_schedule(call: types.CallbackQuery):
     _, direction, group = call.data.split("::")
 
-    # ---------- НОРМАЛИЗАЦИЯ ДНЕЙ ----------
-    day_mapping = {
-        "пн": "ПН", "понедельник": "ПН", "monday": "ПН",
-        "вт": "ВТ", "вторник": "ВТ", "tuesday": "ВТ",
-        "ср": "СР", "среда": "СР", "wednesday": "СР",
-        "чт": "ЧТ", "четверг": "ЧТ", "thursday": "ЧТ",
-        "пт": "ПТ", "пятница": "ПТ", "friday": "ПТ",
-        "сб": "СБ", "суббота": "СБ", "saturday": "СБ",
-        "вс": "ВС", "воскресенье": "ВС", "sunday": "ВС",
-    }
-
-    week_mapping = {
-        "чётная": "ЧЁТНАЯ", "четная": "ЧЁТНАЯ",
-        "чётная неделя": "ЧЁТНАЯ", "четная неделя": "ЧЁТНАЯ",
-        "нечётная": "НЕЧЁТНАЯ", "нечетная": "НЕЧЁТНАЯ",
-        "нечётная неделя": "НЕЧЁТНАЯ", "нечетная неделя": "НЕЧЁТНАЯ",
-    }
-
-    # ---------- ТЕКУЩАЯ ДАТА ----------
     now = datetime.now()
     week_number = now.isocalendar().week
     week_type = "ЧЁТНАЯ" if week_number % 2 == 0 else "НЕЧЁТНАЯ"
@@ -205,15 +503,6 @@ async def show_schedule(call: types.CallbackQuery):
     days = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
     today = days[now.weekday()]
 
-    # ---------- НОРМАЛИЗАЦИЯ ----------
-    # Не трогаем direction и group - они уже правильные из callback_data
-    today_norm = day_mapping.get(today.lower(), today)
-    week_type_norm = week_mapping.get(week_type.lower(), week_type)
-
-    # ---------- ДЕБАГ ----------
-    print(f"DEBUG: direction='{direction}', group='{group}', day='{today_norm}', week='{week_type_norm}'")
-
-    # ---------- ЗАПРОС К БД ----------
     conn = get_connection()
     cur = conn.cursor()
 
@@ -225,45 +514,33 @@ async def show_schedule(call: types.CallbackQuery):
           AND day = ?
           AND week_type = ?
         ORDER BY pair
-    """, (direction, group, today_norm, week_type_norm))
+    """, (direction, group, today, week_type))
 
     data = cur.fetchall()
     conn.close()
 
-    # ---------- ОТВЕТ ----------
     if not data:
-        # Проверим, есть ли вообще расписание для этой группы
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM schedule WHERE group_name = ?", (group,))
-        count = cur.fetchone()[0]
-        conn.close()
-        
-        if count == 0:
-            await call.message.answer(
-                f"❌ Группа '{group}' не найдена в базе данных\n"
-                f"Проверьте правильность названия группы"
-            )
-        else:
-            await call.message.answer(
-                f"📅 Группа: {group}\n"
-                f"📖 Неделя: {week_type_norm}\n"
-                f"🗓 День: {today_norm}\n\n"
-                f"❌ Пар нет"
-            )
+        await send_with_delete(
+            call.message.chat.id,
+            call.from_user.id,
+            f"📅 Группа: {group}\n"
+            f"📖 Неделя: {week_type}\n"
+            f"🗓 День: {today}\n\n"
+            f"❌ Пар нет"
+        )
         await call.answer()
         return
 
     text = (
         f"📅 Группа: {group}\n"
-        f"📖 Неделя: {week_type_norm}\n"
-        f"🗓 День: {today_norm}\n\n"
+        f"📖 Неделя: {week_type}\n"
+        f"🗓 День: {today}\n\n"
     )
 
     for pair, time, lesson in data:
         text += f"{pair} пара ({time}): {lesson}\n"
 
-    await call.message.answer(text)
+    await send_with_delete(call.message.chat.id, call.from_user.id, text)
     await call.answer()
 
 
@@ -271,20 +548,25 @@ async def show_schedule(call: types.CallbackQuery):
 @dp.callback_query(F.data == "back")
 async def back(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.answer("⬅️ Вы вернулись в меню", reply_markup=menu)
+    await send_with_delete(call.message.chat.id, call.from_user.id, "⬅️ Вы вернулись в меню", reply_markup=menu)
     await call.answer()
+
 
 # ---------------- HELP ----------------
 @dp.message(F.text == "ℹ️ Помощь")
 async def help_command(message: types.Message):
-    await message.answer(
+    await send_with_delete(
+        message.chat.id,
+        message.from_user.id,
         "🆘 Для управления ботом используй кнопки.\n"
         "🔄 Если бот не отвечает перезагрузи его /start.\n"
         "📱 Связь с разработчиком: @V_III_D"
     )
 
+
 # ---------------- MAIN ----------------
 async def main():
+    from db.database import init_db, seed_data
     init_db()
     seed_data()
 
