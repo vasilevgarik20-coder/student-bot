@@ -175,7 +175,7 @@ async def save_news_with_photo(message: types.Message, state: FSMContext):
     conn.commit()
     conn.close()
     await state.clear()
-    await send_with_delete(message.chat.id, message.from_user.id, f"✅ Новость '{title}' добавлена!")
+    await message.answer(f"✅ Новость '{title}' добавлена!")
     await send_news_to_users(title, text, photo_id)
 
 async def send_news_to_users(title, text, photo_id):
