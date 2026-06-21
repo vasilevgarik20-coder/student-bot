@@ -10,4 +10,4 @@ if not TOKEN:
    
     raise RuntimeError("BOT_TOKEN not set. Please set it in environment variables.")
 
-ADMIN_ID = 1594991072
+ADMIN_ID = 594991072
