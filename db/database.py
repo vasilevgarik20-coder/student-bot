@@ -1,8 +1,7 @@
 import sqlite3
 import os
 from config import ADMIN_ID   # <-- импортируем главного админа
-
-DB_NAME = "bot.db"
+DB_NAME = os.path.join(os.path.dirname(__file__), '..', 'bot.db')
 
 # ---------------- TIME ----------------
 TIME = {

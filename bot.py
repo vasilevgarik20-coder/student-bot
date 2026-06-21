@@ -524,12 +524,15 @@ async def unknown_command(message: types.Message):
 
 # ============================== MAIN ==============================
 async def main():
-    from db.database import init_db, seed_data
-    init_db()
-    seed_data()
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
+    try:
+        from db.database import init_db, seed_data
+        init_db()
+        seed_data()
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
+    except Exception as e:
+        logging.error(f"Ошибка при запуске бота: {e}")
+        raise
 
 if __name__ == "__main__":
     asyncio.run(main())
