@@ -507,6 +507,20 @@ async def help_command(message: types.Message):
         reply_markup=help_kb
     )
 
+# ---------------- ОБРАБОТЧИК НЕИЗВЕСТНЫХ КОМАНД ----------------
+@dp.message(F.text)
+async def unknown_command(message: types.Message):
+    # Игнорируем команды (начинаются с /)
+    if message.text.startswith('/'):
+        return
+    # Игнорируем кнопки меню (они обрабатываются другими хендлерами)
+    if message.text in ["📚 FAQ", "📅 Расписание", "📰 Новости", "ℹ️ Помощь"]:
+        return
+    await send_with_delete(
+        message.chat.id,
+        message.from_user.id,
+        "❓ Я не знаю такой команды. Используй кнопки меню."
+    )
 
 # ============================== MAIN ==============================
 async def main():
