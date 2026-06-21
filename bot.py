@@ -398,29 +398,28 @@ async def show_news(message: types.Message):
     cur.execute("SELECT id, title, text, photo_id FROM news ORDER BY id DESC LIMIT 10")
     data = cur.fetchall()
     conn.close()
+    
     if not data:
-        await send_with_delete(message.chat.id, message.from_user.id, "📭 Новостей пока нет", reply_markup=news_kb)
+        await message.answer("📭 Новостей пока нет", reply_markup=news_kb)
         return
 
-    await delete_previous(message.from_user.id, message.chat.id)
+    # Отправляем каждую новость обычным способом (без удаления)
     for news_id, title, text, photo_id in data:
         try:
             if photo_id:
-                msg = await bot.send_photo(
-                    message.chat.id,
+                await message.answer_photo(
                     photo_id,
                     caption=f"📰 {title}\n\n{text}\n\n🆔 ID: {news_id}"
                 )
             else:
-                msg = await bot.send_message(
-                    message.chat.id,
+                await message.answer(
                     f"📰 {title}\n\n{text}\n\n🆔 ID: {news_id}"
                 )
-            last_msg[message.from_user.id] = msg.message_id
         except Exception as e:
             logging.error(f"Ошибка при показе новости: {e}")
-    # Кнопка меню после списка
-    await send_with_delete(message.chat.id, message.from_user.id, "⬅️ Вернуться в меню", reply_markup=news_kb)
+    
+    # Отправляем кнопку возврата в меню (тоже без удаления)
+    await message.answer("⬅️ Вернуться в меню", reply_markup=news_kb)
 
 
 # ============================== START ==============================
