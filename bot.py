@@ -79,14 +79,9 @@ admin_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🚪 Выйти из админ-панели", callback_data="exit_admin")]
 ])
 
-# Клавиатура для удаления новостей (без меню, только "Назад")
-delete_news_kb = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🔙 Назад", callback_data="exit_admin")]
-])
-
-# Клавиатура для удаления админов (без меню, только "Назад")
-delete_admin_kb = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🔙 Назад", callback_data="exit_admin")]
+# Клавиатура для возврата в админ-панель после действий
+back_to_admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🔙 Назад в админ-панель", callback_data="back_to_admin")]
 ])
 
 groups_map = {
@@ -111,6 +106,26 @@ async def to_menu(call: types.CallbackQuery, state: FSMContext):
         f"Выбери раздел:",
         reply_markup=menu
     )
+    last_msg[call.from_user.id] = msg.message_id
+    await call.answer()
+
+
+# ---------------- ОБРАБОТЧИК "НАЗАД В АДМИН-ПАНЕЛЬ" ----------------
+@dp.callback_query(F.data == "back_to_admin")
+async def back_to_admin(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await delete_previous(call.from_user.id, call.message.chat.id)
+    # Проверяем права
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM admins WHERE user_id = ?", (call.from_user.id,))
+    admin = cur.fetchone()
+    conn.close()
+    if not admin:
+        await call.message.answer("⛔ Нет доступа")
+        await call.answer()
+        return
+    msg = await call.message.answer("🛠 Админ-панель", reply_markup=admin_kb)
     last_msg[call.from_user.id] = msg.message_id
     await call.answer()
 
@@ -175,7 +190,11 @@ async def save_news_with_photo(message: types.Message, state: FSMContext):
     conn.commit()
     conn.close()
     await state.clear()
-    await message.answer(f"✅ Новость '{title}' добавлена!")
+    # Подтверждение без автоудаления, с кнопкой "Назад в админ-панель"
+    await message.answer(
+        f"✅ Новость '{title}' добавлена!",
+        reply_markup=back_to_admin_kb
+    )
     await send_news_to_users(title, text, photo_id)
 
 async def send_news_to_users(title, text, photo_id):
@@ -249,7 +268,13 @@ async def confirm_delete_news(call: types.CallbackQuery):
     cur.execute("DELETE FROM news WHERE id = ?", (news_id,))
     conn.commit()
     conn.close()
-    await send_with_delete(call.message.chat.id, call.from_user.id, f"✅ Новость '{title}' удалена!")
+    # Подтверждение с кнопкой "Назад в админ-панель"
+    await send_with_delete(
+        call.message.chat.id,
+        call.from_user.id,
+        f"✅ Новость '{title}' удалена!",
+        reply_markup=back_to_admin_kb
+    )
     await call.answer()
 
 
@@ -275,9 +300,19 @@ async def add_admin_save(message: types.Message, state: FSMContext):
     try:
         cur.execute("INSERT INTO admins (user_id) VALUES (?)", (user_id,))
         conn.commit()
-        await send_with_delete(message.chat.id, message.from_user.id, f"✅ Пользователь {user_id} добавлен в админы!")
+        await send_with_delete(
+            message.chat.id,
+            message.from_user.id,
+            f"✅ Пользователь {user_id} добавлен в админы!",
+            reply_markup=back_to_admin_kb
+        )
     except sqlite3.IntegrityError:
-        await send_with_delete(message.chat.id, message.from_user.id, f"⚠️ Пользователь {user_id} уже является админом")
+        await send_with_delete(
+            message.chat.id,
+            message.from_user.id,
+            f"⚠️ Пользователь {user_id} уже является админом",
+            reply_markup=back_to_admin_kb
+        )
     finally:
         conn.close()
     await state.clear()
@@ -314,7 +349,12 @@ async def confirm_delete_admin(call: types.CallbackQuery):
         await call.answer("❌ Только главный админ может удалять админов", show_alert=True)
         return
     if user_id == ADMIN_ID:
-        await send_with_delete(call.message.chat.id, call.from_user.id, "❌ Нельзя удалить главного админа!")
+        await send_with_delete(
+            call.message.chat.id,
+            call.from_user.id,
+            "❌ Нельзя удалить главного админа!",
+            reply_markup=back_to_admin_kb
+        )
         await call.answer()
         return
     conn = get_connection()
@@ -322,7 +362,12 @@ async def confirm_delete_admin(call: types.CallbackQuery):
     cur.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
-    await send_with_delete(call.message.chat.id, call.from_user.id, f"✅ Админ {user_id} удален!")
+    await send_with_delete(
+        call.message.chat.id,
+        call.from_user.id,
+        f"✅ Админ {user_id} удален!",
+        reply_markup=back_to_admin_kb
+    )
     await call.answer()
 
 
