@@ -1,5 +1,8 @@
 import os
 
-TOKEN = "8807870083:AAFuxkrsmCh6QGcASYP4eGcdgqqbcuyJeg0"
+TOKEN = os.getenv("BOT_TOKEN")
 
-print("TOKEN LOADED:", TOKEN)
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN not set")
+
+ADMIN_ID = 1594991072
